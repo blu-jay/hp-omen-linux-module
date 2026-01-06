@@ -5,10 +5,14 @@ Manages RGB lighting for HP Omen laptops with FourZone keyboard support
 """
 
 import argparse
+import atexit
+import json
+import math
 import os
 import re
+import signal
 import sys
-import json
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -17,6 +21,7 @@ SYSFS_BASE = "/sys/devices/platform/hp-wmi/rgb_zones"
 ZONE_COUNT = 4
 CONFIG_DIR = Path.home() / ".config" / "omen-rgb"
 CONFIG_FILE = CONFIG_DIR / "schemes.json"
+PID_FILE = "/tmp/omen-rgb-daemon.pid"
 
 # Named color presets (hex format)
 COLOR_PRESETS = {
@@ -120,6 +125,29 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
     return f"{r:02X}{g:02X}{b:02X}"
 
 
+def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    """Convert hex color string to RGB tuple."""
+    hex_color = validate_hex_color(hex_color)
+    return (int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16))
+
+
+def interpolate_color(c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
+    """Linear interpolation between two RGB colors. t is 0.0 to 1.0."""
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * t),
+        int(c1[1] + (c2[1] - c1[1]) * t),
+        int(c1[2] + (c2[2] - c1[2]) * t)
+    )
+
+
+def set_zone_color_silent(zone: int, color: str) -> None:
+    """Set zone color without printing (for animations)."""
+    color = validate_hex_color(color)
+    zone_path = get_zone_path(zone)
+    with open(zone_path, 'w') as f:
+        f.write(color)
+
+
 def parse_zone_color_pairs(pairs: List[str]) -> List[Tuple[int, str]]:
     """Parse zone:color pairs from positional arguments."""
     result = []
@@ -217,6 +245,265 @@ def list_color_presets() -> None:
         print(f"  {name:12} - #{hex_val}")
 
 
+# ============================================================================
+# Animation Functions
+# ============================================================================
+
+# Global flag for animation loop control
+_animation_running = False
+
+
+def animate_breathe(colors: List[str], speed: float) -> None:
+    """Breathing animation - fades zones in and out smoothly.
+
+    Args:
+        colors: List of colors (one per zone, or single color for all)
+        speed: Seconds per breathing cycle
+    """
+    global _animation_running
+    _animation_running = True
+
+    # Prepare RGB colors for each zone
+    rgb_colors = []
+    for zone in range(ZONE_COUNT):
+        color = colors[zone % len(colors)]
+        rgb_colors.append(hex_to_rgb(color))
+
+    steps = 40  # Steps per cycle for smooth appearance
+    step_delay = speed / steps
+
+    print(f"Breathing animation (speed: {speed}s per cycle, Ctrl+C to stop)...")
+
+    step = 0
+    while _animation_running:
+        # Sine wave for smooth breathing: 0 -> 1 -> 0
+        t = (math.sin(step * math.pi * 2 / steps - math.pi / 2) + 1) / 2
+
+        for zone in range(ZONE_COUNT):
+            base_r, base_g, base_b = rgb_colors[zone]
+            r = int(base_r * t)
+            g = int(base_g * t)
+            b = int(base_b * t)
+            try:
+                set_zone_color_silent(zone, rgb_to_hex(r, g, b))
+            except Exception:
+                pass  # Ignore write errors during animation
+
+        step = (step + 1) % steps
+        time.sleep(step_delay)
+
+
+def animate_cycle(colors: List[str], speed: float) -> None:
+    """Color cycle animation - smoothly transitions through colors.
+
+    Args:
+        colors: List of colors to cycle through
+        speed: Seconds for one complete cycle through all colors
+    """
+    global _animation_running
+    _animation_running = True
+
+    if len(colors) < 2:
+        colors = ["FF0000", "FF8000", "FFFF00", "00FF00", "00FFFF", "0000FF", "8000FF", "FF00FF"]
+
+    rgb_colors = [hex_to_rgb(c) for c in colors]
+    num_colors = len(rgb_colors)
+    steps_per_color = 20
+    total_steps = num_colors * steps_per_color
+    step_delay = speed / total_steps
+
+    print(f"Color cycle animation (speed: {speed}s per cycle, Ctrl+C to stop)...")
+
+    step = 0
+    while _animation_running:
+        # Calculate which two colors to blend
+        color_pos = (step / steps_per_color) % num_colors
+        idx1 = int(color_pos)
+        idx2 = (idx1 + 1) % num_colors
+        blend = color_pos - idx1
+
+        r, g, b = interpolate_color(rgb_colors[idx1], rgb_colors[idx2], blend)
+        hex_color = rgb_to_hex(r, g, b)
+
+        for zone in range(ZONE_COUNT):
+            try:
+                set_zone_color_silent(zone, hex_color)
+            except Exception:
+                pass
+
+        step = (step + 1) % total_steps
+        time.sleep(step_delay)
+
+
+def animate_wave(colors: List[str], speed: float) -> None:
+    """Wave animation - colors ripple across zones left to right.
+
+    Args:
+        colors: List of colors for the wave
+        speed: Seconds for one complete wave cycle
+    """
+    global _animation_running
+    _animation_running = True
+
+    if len(colors) < 2:
+        colors = ["FF0000", "FF8000", "FFFF00", "00FF00", "00FFFF", "0000FF"]
+
+    rgb_colors = [hex_to_rgb(c) for c in colors]
+    num_colors = len(rgb_colors)
+    steps = 40
+    step_delay = speed / steps
+    phase_offset = 1.0 / ZONE_COUNT  # Offset between zones
+
+    print(f"Wave animation (speed: {speed}s per cycle, Ctrl+C to stop)...")
+
+    step = 0
+    while _animation_running:
+        base_t = step / steps
+
+        for zone in range(ZONE_COUNT):
+            # Each zone is offset in the color cycle
+            zone_t = (base_t + zone * phase_offset) % 1.0
+            color_pos = zone_t * num_colors
+            idx1 = int(color_pos) % num_colors
+            idx2 = (idx1 + 1) % num_colors
+            blend = color_pos - int(color_pos)
+
+            r, g, b = interpolate_color(rgb_colors[idx1], rgb_colors[idx2], blend)
+            try:
+                set_zone_color_silent(zone, rgb_to_hex(r, g, b))
+            except Exception:
+                pass
+
+        step = (step + 1) % steps
+        time.sleep(step_delay)
+
+
+def stop_animation() -> None:
+    """Stop the running animation."""
+    global _animation_running
+    _animation_running = False
+
+
+# ============================================================================
+# Daemon Functions
+# ============================================================================
+
+def get_daemon_pid() -> Optional[int]:
+    """Read PID from PID file. Returns None if not running."""
+    try:
+        with open(PID_FILE, 'r') as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def is_daemon_running() -> bool:
+    """Check if daemon is currently running."""
+    pid = get_daemon_pid()
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)  # Signal 0 checks if process exists
+        return True
+    except OSError:
+        # Process doesn't exist, clean up stale PID file
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
+        return False
+
+
+def write_pid() -> None:
+    """Write current PID to PID file."""
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+
+def remove_pid() -> None:
+    """Remove PID file."""
+    try:
+        os.remove(PID_FILE)
+    except OSError:
+        pass
+
+
+def stop_daemon() -> bool:
+    """Stop the running daemon. Returns True if daemon was stopped."""
+    pid = get_daemon_pid()
+    if pid is None:
+        print("No daemon running.")
+        return False
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        # Wait a bit for it to stop
+        for _ in range(10):
+            time.sleep(0.1)
+            if not is_daemon_running():
+                print("Daemon stopped.")
+                return True
+        print(f"Daemon (PID {pid}) did not stop gracefully.")
+        return False
+    except OSError as e:
+        print(f"Error stopping daemon: {e}")
+        return False
+
+
+def daemon_status() -> None:
+    """Print daemon status."""
+    if is_daemon_running():
+        pid = get_daemon_pid()
+        print(f"Daemon is running (PID: {pid})")
+    else:
+        print("Daemon is not running.")
+
+
+def daemonize() -> None:
+    """Fork into background as a daemon using double-fork."""
+    # First fork
+    pid = os.fork()
+    if pid > 0:
+        # Parent exits
+        sys.exit(0)
+
+    # Create new session
+    os.setsid()
+
+    # Second fork
+    pid = os.fork()
+    if pid > 0:
+        # First child exits
+        sys.exit(0)
+
+    # Now we're in the daemon process
+    # Redirect stdio to /dev/null
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    with open('/dev/null', 'r') as devnull:
+        os.dup2(devnull.fileno(), sys.stdin.fileno())
+    with open('/dev/null', 'a+') as devnull:
+        os.dup2(devnull.fileno(), sys.stdout.fileno())
+        os.dup2(devnull.fileno(), sys.stderr.fileno())
+
+    # Write PID file
+    write_pid()
+
+    # Register cleanup
+    atexit.register(remove_pid)
+
+
+def setup_signal_handlers() -> None:
+    """Set up signal handlers for graceful shutdown."""
+    def signal_handler(signum, frame):
+        stop_animation()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="CLI tool for managing HP Omen RGB zones",
@@ -253,6 +540,25 @@ Examples:
 
   # List available color presets
   omen-rgb --list-colors
+
+Animation examples:
+  # Breathing animation with cyan (foreground)
+  sudo omen-rgb --animate breathe --colors cyan
+
+  # Color cycle through rainbow (foreground)
+  sudo omen-rgb --animate cycle --colors red orange yellow green blue purple
+
+  # Wave animation as background daemon
+  sudo omen-rgb --animate wave --colors cyan magenta --daemon
+
+  # Adjust animation speed (seconds per cycle)
+  sudo omen-rgb --animate breathe --colors blue --speed 2.0
+
+  # Stop animation daemon
+  sudo omen-rgb --stop
+
+  # Check daemon status
+  omen-rgb --status
         """
     )
 
@@ -288,6 +594,25 @@ Examples:
     # Info
     group.add_argument('--list-colors', action='store_true',
                       help='List all available named color presets')
+
+    # Animation control
+    group.add_argument('--animate', type=str, metavar='TYPE',
+                      choices=['breathe', 'cycle', 'wave'],
+                      help='Start animation: breathe, cycle, or wave')
+
+    # Daemon control
+    group.add_argument('--stop', action='store_true',
+                      help='Stop running animation daemon')
+    group.add_argument('--status', action='store_true',
+                      help='Show animation daemon status')
+
+    # Animation options (not mutually exclusive)
+    parser.add_argument('--speed', type=float, default=1.0, metavar='SECONDS',
+                       help='Animation speed in seconds per cycle (default: 1.0)')
+    parser.add_argument('--colors', type=str, nargs='+', metavar='COLOR',
+                       help='Colors for animation (hex or named colors)')
+    parser.add_argument('--daemon', action='store_true',
+                       help='Run animation in background as daemon')
 
     # Positional arguments for zone:color pairs
     parser.add_argument('pairs', nargs='*', metavar='ZONE:COLOR',
@@ -401,6 +726,61 @@ Examples:
     # Handle --list-colors
     if args.list_colors:
         list_color_presets()
+        return
+
+    # Handle --stop
+    if args.stop:
+        stop_daemon()
+        return
+
+    # Handle --status
+    if args.status:
+        daemon_status()
+        return
+
+    # Handle --animate
+    if args.animate:
+        check_sysfs_exists()
+
+        # Check if daemon already running
+        if args.daemon and is_daemon_running():
+            print("Error: Daemon already running. Use --stop first.", file=sys.stderr)
+            sys.exit(1)
+
+        # Prepare colors
+        if args.colors:
+            try:
+                colors = [validate_hex_color(c) for c in args.colors]
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            # Default colors based on animation type
+            if args.animate == 'breathe':
+                colors = ['00FFFF']  # cyan
+            elif args.animate == 'cycle':
+                colors = ['FF0000', 'FF8000', 'FFFF00', '00FF00', '00FFFF', '0000FF', '8000FF', 'FF00FF']
+            else:  # wave
+                colors = ['FF0000', 'FF8000', 'FFFF00', '00FF00', '00FFFF', '0000FF']
+
+        # Set up signal handlers for graceful shutdown
+        setup_signal_handlers()
+
+        # Daemonize if requested
+        if args.daemon:
+            print(f"Starting {args.animate} animation daemon...")
+            daemonize()
+
+        # Run animation
+        try:
+            if args.animate == 'breathe':
+                animate_breathe(colors, args.speed)
+            elif args.animate == 'cycle':
+                animate_cycle(colors, args.speed)
+            elif args.animate == 'wave':
+                animate_wave(colors, args.speed)
+        except KeyboardInterrupt:
+            print("\nAnimation stopped.")
         return
 
     # No arguments provided

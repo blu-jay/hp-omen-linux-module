@@ -14,25 +14,24 @@ Currently working:
 
 ## Installation
 
-1. Install dkms and kernel headers if needed (already present on Ubuntu)
+```bash
+git clone https://github.com/pointzerotwo/hp-omen-linux-module.git
+cd hp-omen-linux-module
+sudo ./install.sh
+```
 
-1. Run `sudo make install`
+This will automatically install dependencies, build the kernel module via DKMS, and set up the `omen-rgb` CLI tool.
 
-Module will be built and installed, and DKMS will manage rebuilding it on kernel updates.
+Supports: Debian/Ubuntu, Arch, Fedora, and openSUSE.
+
+To uninstall:
+```bash
+sudo ./install.sh --uninstall
+```
 
 ## Usage
 
-### Using the omen-rgb CLI Tool (Recommended)
-
-The `omen-rgb` CLI tool provides a convenient interface for managing RGB zones.
-
-#### Installation
-
-```bash
-sudo ./install-omen-rgb.sh
-```
-
-This will create a symlink to `/usr/local/bin/omen-rgb` so you can use it from anywhere.
+### Using the omen-rgb CLI Tool
 
 #### Basic Usage
 
@@ -76,6 +75,46 @@ omen-rgb --help
 
 The tool supports named colors: `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `white`, `orange`, `purple`, `pink`, `lime`, `teal`, `off`, `black`
 
+#### Keyboard Animations
+
+The tool supports three animation effects that can run in foreground or as a background daemon.
+
+**Animation Types:**
+- `breathe` - Fades zones in and out smoothly (breathing/pulse effect)
+- `cycle` - Smoothly transitions through a color palette
+- `wave` - Colors ripple across zones from left to right
+
+**Basic Usage:**
+
+```bash
+# Breathing animation (foreground, Ctrl+C to stop)
+sudo omen-rgb --animate breathe --colors cyan
+
+# Color cycle with custom colors
+sudo omen-rgb --animate cycle --colors red orange yellow green blue purple
+
+# Wave animation with slower speed (2 seconds per cycle)
+sudo omen-rgb --animate wave --colors cyan magenta --speed 2.0
+```
+
+**Daemon Mode (Background):**
+
+```bash
+# Start animation as background daemon
+sudo omen-rgb --animate breathe --colors blue --daemon
+
+# Check daemon status
+omen-rgb --status
+
+# Stop the daemon
+sudo omen-rgb --stop
+```
+
+**Animation Options:**
+- `--speed SECONDS` - Animation speed in seconds per cycle (default: 1.0)
+- `--colors COLOR...` - One or more colors (hex or named). Defaults vary by animation type.
+- `--daemon` - Run animation in background
+
 ### Direct sysfs Access (Advanced)
 
 The module creates four files in `/sys/devices/platform/hp-wmi/rgb_zones/` named `zone00 - zone03`.
@@ -90,6 +129,8 @@ Omen and other hotkeys are bound to regular X11 keysyms, use your chosen desktop
 
 ## To do:
 
-- [ ] FourZone brightness control
-- [ ] Fan control 
+- [x] FourZone keyboard animations (breathing, cycle, wave)
+- [ ] FourZone brightness control (hardware)
+- [ ] Hardware animation support (reverse engineer WMI)
+- [ ] Fan control
 
