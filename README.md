@@ -1,16 +1,38 @@
-HP Omen special feature control for Linux
------------------------------------------
+HP Omen special feature control for Linux (with macro key support)
+------------------------------------------------------------------
 
-This is a version of the hp-wmi kernel module that implements some of the features of HP Omen Command Centre.
+This is a fork of [pointzerotwo/hp-omen-linux-module](https://github.com/pointzerotwo/hp-omen-linux-module)
+with **P1-P6 macro key support** ported from [xddxdd/hp-omen-linux-module](https://github.com/xddxdd/hp-omen-linux-module).
 
-It's totally experimental right now, and could easily crash your machine. 
+The original xddxdd module added macro key support but no longer compiles on
+kernels 6.17+. The pointzerotwo fork fixed kernel compatibility but didn't
+include macro keys. This fork combines both.
 
+### What was changed
+
+- Enlarged `bios_args.data` buffer from 128 to 4096 bytes to fit the macro profile
+- Added `HPWMI_MACRO_PROFILE_SET` and `HPWMI_MACRO_MODE_SET` WMI commands
+- Added `HPWMI_GM` command type for gaming WMI queries
+- Switched `hp_wmi_perform_query` from stack to heap allocation (`kzalloc`) since the struct is now ~4KB
+- Added `macro_profile_bytes[4096]` that programs P1-P6 to emit `Ctrl+Shift+Alt+F1-F6`
+- Added `macro_key_setup()` / `macro_key_remove()` called on module load/unload
+
+### Why Ctrl+Shift+Alt combos?
+
+The HP EC only supports PS/2 Scan Code Set 1 (codes 0x01-0x58). Keys like
+F13-F18 don't exist in this set, and codes above 0x58 get mangled by the EC's
+internal translation. Using combos of real modifier keys + F-keys gives unique
+bindings that won't conflict with any physical key, while staying within the
+EC's supported range.
+
+This is AI slop coded just to quickly get it working so
 **USE AT YOUR OWN RISK**
 
 Currently working:
 
 - FourZone keyboard colour control (`/sys/devices/platforms/hp-wmi/rgb-zones/zone0[0-3]`)
 - Omen hotkeys
+- **P1-P6 macro keys** (emit Ctrl+Shift+Alt+F1-F6)
 
 ## Installation
 
