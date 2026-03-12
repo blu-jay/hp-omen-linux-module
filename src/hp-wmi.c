@@ -76,7 +76,7 @@ struct bios_args {
   u32 command;
   u32 commandtype;
   u32 datasize;
-  u8  data[128];
+  u8  data[4096];
 };
 
 enum hp_wmi_commandtype {
@@ -93,6 +93,9 @@ enum hp_wmi_commandtype {
   HPWMI_WIRELESS2_QUERY		= 0x1b,
   HPWMI_POSTCODEERROR_QUERY	= 0x2a,
 
+  HPWMI_MACRO_PROFILE_SET	= 15,
+  HPWMI_MACRO_MODE_SET		= 23,
+
   HPWMI_FOURZONE_COLOR_GET = 2,
   HPWMI_FOURZONE_COLOR_SET = 3,
   HPWMI_FOURZONE_BRIGHT_GET = 4,
@@ -106,6 +109,7 @@ enum hp_wmi_command {
   HPWMI_WRITE	= 0x02,
   HPWMI_ODM	= 0x03,
   HPWMI_FOURZONE = 131081,
+  HPWMI_GM	= 0x20008,
 };
 
 enum hp_wmi_hardware_mask {
@@ -253,14 +257,8 @@ static int hp_wmi_perform_query(int query, enum hp_wmi_command command,
   struct bios_return *bios_return;
   int actual_outsize;
   union acpi_object *obj;
-  struct bios_args args = {
-    .signature = 0x55434553,
-    .command = command,
-    .commandtype = query,
-    .datasize = insize,
-    .data = { 0 },
-  };
-  struct acpi_buffer input = { sizeof(struct bios_args), &args };
+  struct bios_args *args = NULL;
+  struct acpi_buffer input = { sizeof(struct bios_args), NULL };
   struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
   int ret = 0;
 
@@ -268,11 +266,21 @@ static int hp_wmi_perform_query(int query, enum hp_wmi_command command,
   if (WARN_ON(mid < 0))
     return mid;
 
-  if (WARN_ON(insize > sizeof(args.data)))
+  if (WARN_ON(insize > sizeof(args->data)))
     return -EINVAL;
-  memcpy(&args.data[0], buffer, insize);
+
+  args = kzalloc(sizeof(struct bios_args), GFP_KERNEL);
+  if (!args)
+    return -ENOMEM;
+  args->signature = 0x55434553;
+  args->command = command;
+  args->commandtype = query;
+  args->datasize = insize;
+  memcpy(&args->data[0], buffer, insize);
+  input.pointer = args;
 
   wmi_evaluate_method(HPWMI_BIOS_GUID, 0, mid, &input, &output);
+  kfree(args);
 
   obj = output.pointer;
 
@@ -1117,6 +1125,111 @@ static int fourzone_setup(struct platform_device *dev)
   return sysfs_create_group(&dev->dev.kobj, &zone_attribute_group);
 }
 
+/*
+ * (EXPERIMENTAL) Macro key support
+ */
+
+#define MACRO_KEY_RELEASE 0x80
+
+/*
+ * PS/2 Set 1 scan codes for modifier keys and F1-F6.
+ * P-keys emit Ctrl+Shift+Alt+F1 through F6 combos.
+ */
+#define SC_LCTRL  0x1D
+#define SC_LSHIFT 0x2A
+#define SC_LALT   0x38
+#define SC_F1     0x3B
+#define SC_F2     0x3C
+#define SC_F3     0x3D
+#define SC_F4     0x3E
+#define SC_F5     0x3F
+#define SC_F6     0x40
+
+static u8 macro_profile_bytes[4096] = {
+  /* P1: Ctrl+Shift+Alt+F1 */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F1,
+        SC_F1 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE,
+        SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  /* P2: Ctrl+Shift+Alt+F2 */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F2,
+        SC_F2 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE,
+        SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  /* P3: Ctrl+Shift+Alt+F3 */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F3,
+        SC_F3 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE,
+        SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  /* P4: Ctrl+Shift+Alt+F4 */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F4,
+        SC_F4 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE,
+        SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  /* P5: Ctrl+Shift+Alt+F5 */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F5,
+        SC_F5 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE,
+        SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  /* P6: Ctrl+Shift+Alt+F6 */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F6,
+        SC_F6 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE,
+        SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+
+  /* Ctrl+P1-P6: same as base (Ctrl already included) */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F1, SC_F1 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F2, SC_F2 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F3, SC_F3 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F4, SC_F4 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F5, SC_F5 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F6, SC_F6 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+
+  /* Alt+P1-P6: same as base (Alt already included) */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F1, SC_F1 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F2, SC_F2 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F3, SC_F3 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F4, SC_F4 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F5, SC_F5 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F6, SC_F6 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+
+  /* Shift+P1-P6: same as base (Shift already included) */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F1, SC_F1 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F2, SC_F2 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F3, SC_F3 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F4, SC_F4 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F5, SC_F5 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F6, SC_F6 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+
+  /* Fn+P1-P6: same as base */
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F1, SC_F1 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F2, SC_F2 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F3, SC_F3 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F4, SC_F4 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F5, SC_F5 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+  0x09, SC_LCTRL, SC_LSHIFT, SC_LALT, SC_F6, SC_F6 | MACRO_KEY_RELEASE, SC_LALT | MACRO_KEY_RELEASE, SC_LSHIFT | MACRO_KEY_RELEASE, SC_LCTRL | MACRO_KEY_RELEASE,
+};
+
+static int macro_key_setup(struct platform_device *dev)
+{
+  int ret;
+  u32 macro_enable = 1;
+
+  ret = hp_wmi_perform_query(HPWMI_MACRO_PROFILE_SET, HPWMI_GM,
+           macro_profile_bytes, sizeof(macro_profile_bytes), 0);
+  pr_debug("macro key setup ret 0x%x\n", ret);
+
+  ret = hp_wmi_perform_query(HPWMI_MACRO_MODE_SET, HPWMI_GM,
+           &macro_enable, sizeof(macro_enable), 0);
+  pr_debug("macro key enable ret 0x%x\n", ret);
+
+  return 0;
+}
+
+static void macro_key_remove(struct platform_device *dev)
+{
+  int ret;
+  u32 macro_disable = 0;
+
+  ret = hp_wmi_perform_query(HPWMI_MACRO_MODE_SET, HPWMI_GM,
+           &macro_disable, sizeof(macro_disable), 0);
+  pr_debug("macro key disable ret 0x%x\n", ret);
+}
+
 static int __init hp_wmi_bios_setup(struct platform_device *device)
 {
   int err;
@@ -1131,6 +1244,7 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
     hp_wmi_rfkill2_setup(device);
 
   fourzone_setup(device);
+  macro_key_setup(device);
 
   err = device_create_file(&device->dev, &dev_attr_display);
   if (err)
@@ -1161,6 +1275,7 @@ add_sysfs_error:
 static void __exit hp_wmi_bios_remove(struct platform_device *device)
 {
   int i;
+  macro_key_remove(device);
   cleanup_sysfs(device);
 
   for (i = 0; i < rfkill2_count; i++) {
